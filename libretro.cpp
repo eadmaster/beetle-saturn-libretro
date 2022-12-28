@@ -165,6 +165,71 @@ static void retro_led_interface(void)
    }
 }
 
+/* Frameskipping Support */
+
+static unsigned frameskip_type             = 0;
+static unsigned frameskip_threshold        = 0;
+static uint16_t frameskip_counter          = 0;
+
+static bool retro_audio_buff_active        = false;
+static unsigned retro_audio_buff_occupancy = 0;
+static bool retro_audio_buff_underrun      = false;
+/* Maximum number of consecutive frames that
+ * can be skipped */
+#define FRAMESKIP_MAX 30
+
+static unsigned audio_latency              = 0;
+static bool update_audio_latency           = false;
+
+static void retro_audio_buff_status_cb(
+      bool active, unsigned occupancy, bool underrun_likely)
+{
+   retro_audio_buff_active    = active;
+   retro_audio_buff_occupancy = occupancy;
+   retro_audio_buff_underrun  = underrun_likely;
+}
+
+static void init_frameskip(void)
+{
+   if (frameskip_type > 0)
+   {
+      struct retro_audio_buffer_status_callback buf_status_cb;
+
+      buf_status_cb.callback = retro_audio_buff_status_cb;
+      if (!environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK,
+            &buf_status_cb))
+      {
+         if (log_cb)
+            log_cb(RETRO_LOG_WARN, "Frameskip disabled - frontend does not support audio buffer status monitoring.\n");
+
+         retro_audio_buff_active    = false;
+         retro_audio_buff_occupancy = 0;
+         retro_audio_buff_underrun  = false;
+         audio_latency              = 0;
+      }
+      else
+      {
+         /* Frameskip is enabled - increase frontend
+          * audio latency to minimise potential
+          * buffer underruns */
+         float frame_time_msec = 1000.0f / (float)MEDNAFEN_CORE_TIMING_FPS;
+
+         /* Set latency to 6x current frame time... */
+         audio_latency = (unsigned)((6.0f * frame_time_msec) + 0.5f);
+
+         /* ...then round up to nearest multiple of 32 */
+         audio_latency = (audio_latency + 0x1F) & ~0x1F;
+      }
+   }
+   else
+   {
+      environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK, NULL);
+      audio_latency = 0;
+   }
+
+   update_audio_latency = true;
+}
+
 void retro_init(void)
 {
    struct retro_log_callback log;
@@ -248,6 +313,7 @@ bool shared_backup_toggle = false;
 static void check_variables(bool startup)
 {
    struct retro_variable var = {0};
+   unsigned frameskip_type_prev;
 
    if (startup)
    {
@@ -281,6 +347,31 @@ static void check_variables(bool startup)
 
 	   }
    }
+
+   var.key             = "beetle_saturn_frameskip";
+   var.value           = NULL;
+   frameskip_type_prev = frameskip_type;
+   frameskip_type      = 0;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "auto") == 0)
+         frameskip_type = 1;
+      else if (strcmp(var.value, "manual") == 0)
+         frameskip_type = 2;
+   }
+
+   /* Reinitialise frameskipping, if required */
+   if (startup || (frameskip_type != frameskip_type_prev))
+      init_frameskip();
+
+   var.key             = "beetle_saturn_frameskip_threshold";
+   var.value           = NULL;
+   frameskip_threshold = 33;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      frameskip_threshold = strtol(var.value, NULL, 10);
+
 
    var.key = "beetle_saturn_region";
 
@@ -696,6 +787,7 @@ void retro_run(void)
    unsigned linevisfirst, linevislast;
    static unsigned width, height;
    static unsigned game_width, game_height;
+   int skip_frame          = 0;
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
       check_variables(false);
@@ -715,6 +807,50 @@ void retro_run(void)
    else
 	   input_update( input_state_cb);
 
+    /* Check whether current frame should
+    * be skipped
+    * > Note: Cannot skip the first frame,
+    *   since we need at least one rendered
+    *   frame in order to set initial (valid)
+    *   width/height values for the video_cb
+    *   callback */
+   if ((frameskip_type > 0) &&
+       retro_audio_buff_active &&
+       video_frames)
+   {
+      switch (frameskip_type)
+      {
+         case 1: /* auto */
+            skip_frame = retro_audio_buff_underrun ? 1 : 0;
+            break;
+         case 2: /* manual */
+            skip_frame = (retro_audio_buff_occupancy < frameskip_threshold) ? 1 : 0;
+            break;
+         default:
+            skip_frame = 0;
+            break;
+      }
+
+      if (!skip_frame ||
+          (frameskip_counter >= FRAMESKIP_MAX))
+      {
+         skip_frame        = 0;
+         frameskip_counter = 0;
+      }
+      else
+         frameskip_counter++;
+   }
+   //printf("frameskip_counter=%d\n", frameskip_counter);
+
+   /* If frameskip settings have changed, update
+    * frontend audio latency */
+   if (update_audio_latency)
+   {
+      environ_cb(RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY,
+            &audio_latency);
+      update_audio_latency = false;
+   }
+   
    static int32 rects[MEDNAFEN_CORE_GEOMETRY_MAX_H];
    rects[0] = ~0;
 
