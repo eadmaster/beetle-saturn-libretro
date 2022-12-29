@@ -839,9 +839,9 @@ void retro_run(void)
       }
       else
          frameskip_counter++;
+      //printf("frameskip_counter=%d\n", frameskip_counter);
    }
-   //printf("frameskip_counter=%d\n", frameskip_counter);
-
+   
    /* If frameskip settings have changed, update
     * frontend audio latency */
    if (update_audio_latency)
@@ -862,7 +862,7 @@ void retro_run(void)
    EmulateSpecStruct *espec = (EmulateSpecStruct*)&spec;
 
    Emulate(espec);
-
+  
 #ifdef NEED_DEINTERLACER
    if (spec.InterlaceOn)
    {
@@ -889,6 +889,11 @@ void retro_run(void)
    width          =  rects[0] - (h_mask << hires_h_mode);
    height         =  (linevislast + 1 - linevisfirst) << PrevInterlaced;
 
+   if (skip_frame) {
+      video_cb(NULL, game_width, game_height, pitch);
+      return;
+  }
+  
    if (width != game_width || height != game_height)
    {
       struct retro_system_av_info av_info;
